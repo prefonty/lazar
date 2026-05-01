@@ -27,6 +27,7 @@ If any FAIL appears, the user should investigate before doing real work — most
 HC="$LAZAR_HOME/workspace/.health-check-$(date +%s)"
 mkdir -p "$HC"
 echo "[health-check] starting in $HC"
+OS_NAME="$(uname -s)"
 PASS=0; FAIL=0; SKIP=0
 pass() { echo "  [PASS] $1"; PASS=$((PASS+1)); }
 fail() { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
@@ -41,10 +42,25 @@ echo "── 1. static checks ────────────────�
 # kernel binary
 [ -f "$LAZAR_HOME/bin/lazar" ] && pass "kernel binary at bin/lazar" || fail "no kernel binary"
 
-# kernel locked (macOS chflags uchg)
-ls -lO "$LAZAR_HOME/bin/lazar" 2>/dev/null | grep -q uchg \
-    && pass "kernel binary is uchg-locked (immutable)" \
-    || fail "kernel binary is NOT immutable — chflags uchg should be set"
+# kernel locked/sealed
+case "$OS_NAME" in
+    Darwin)
+        ls -lO "$LAZAR_HOME/bin/lazar" 2>/dev/null | grep -q uchg \
+            && pass "kernel binary is uchg-locked (immutable)" \
+            || fail "kernel binary is NOT immutable — chflags uchg should be set"
+        ;;
+    Linux)
+        [ ! -w "$LAZAR_HOME/bin/lazar" ] \
+            && pass "kernel binary is not user-writable" \
+            || fail "kernel binary is writable — setup/kernel-build should chmod 555 it"
+        command -v bwrap >/dev/null 2>&1 \
+            && pass "bubblewrap sandbox backend available" \
+            || fail "bwrap not found — install bubblewrap"
+        ;;
+    *)
+        fail "unsupported OS: $OS_NAME"
+        ;;
+esac
 
 # source not user-writable
 TESTSRC="$LAZAR_HOME/src/.health-write-probe"

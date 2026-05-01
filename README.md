@@ -17,7 +17,7 @@ Everything else is emergent.
 
 ```
 ~/lazar/
-├── bin/lazar              the immutable kernel (chflags uchg after build)
+├── bin/lazar              the sealed kernel
 ├── src/                   kernel source (read-only after build)
 ├── scripts/               kernel ceremony helpers + lazar-chat.sh wrapper
 ├── skills/                the agent's "being" — capabilities as folders
@@ -30,7 +30,7 @@ The kernel is a small Rust runner. It does three things:
 
 1. Takes a prompt via `-p`.
 2. Calls Claude (SSE-streamed) with one tool, `execute(command)`.
-3. Runs the bash through `sandbox-exec` and feeds the output back.
+3. Runs the bash through the platform sandbox and feeds the output back.
 
 That's it. State (memory, skills) lives on disk. Capabilities are markdown files
 the agent reads and writes. Nested `lazar -p` recursion is intentionally API-key
@@ -45,7 +45,32 @@ that lives as skills.
 
 ## Setup
 
-Requires macOS (for `sandbox-exec` and `chflags uchg`) and the Rust toolchain.
+Requires macOS or Linux and the Rust toolchain. macOS uses `sandbox-exec`.
+Linux uses `bubblewrap` (`bwrap`).
+
+### Ubuntu 24.04 / Hetzner VPS
+
+Create a dedicated non-root user before installing:
+
+```bash
+sudo adduser lazar
+sudo usermod -aG sudo lazar
+su - lazar
+```
+
+Install system dependencies:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl ca-certificates git
+```
+
+Install Rust if needed:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"
+```
 
 ### From a git clone (recommended)
 
@@ -58,7 +83,7 @@ export ANTHROPIC_API_KEY=sk-...
 lazar -p "what skills do you have?"
 ```
 
-Setup builds with an external Cargo target directory (`$LAZAR_HOME/workspace/.cargo-target` by default), installs the binary at `~/lazar/bin/lazar`, locks it with `chflags uchg`, and seeds `skills/` only when the skills directory has no `INDEX.md`. Re-running setup preserves existing skills, memory, workspace, logs, and source unless you opt into source update or reset.
+Setup builds with an external Cargo target directory (`$LAZAR_HOME/workspace/.cargo-target` by default), installs the binary at `~/lazar/bin/lazar`, seals it, and seeds `skills/` only when the skills directory has no `INDEX.md`. Re-running setup preserves existing skills, memory, workspace, logs, and source unless you opt into source update or reset.
 
 ### What's in vs out of git
 
@@ -126,9 +151,10 @@ lazar --help
 
 After `setup.sh` completes:
 
-- `bin/lazar` has `chflags uchg` (OS-level immutable). Nothing — not the agent, not the user, not root — can modify or delete it without `chflags nouchg` first.
+- On macOS, `bin/lazar` has `chflags uchg` (OS-level immutable). Nothing — not the agent, not the user, not root — can modify or delete it without `chflags nouchg` first.
+- On Linux, `bin/lazar` is installed read-only (`chmod 555`) and the `bubblewrap` tool sandbox does not bind `bin/` as writable.
 - `src/` is `chmod -R a-w`. The source is sealed.
-- The sandbox profile (compiled into the binary via `include_str!`) blocks writes to `bin/` and `src/` from any bash command the agent runs.
+- The platform sandbox blocks writes to `bin/` and `src/` from any bash command the agent runs.
 
 The agent can `cat` the binary or the source — it can study itself. It cannot modify the runner. Evolution happens only in `skills/`.
 
@@ -187,7 +213,10 @@ That creates a timestamped `src.backup.*` first. Runtime state is still preserve
 
 ## Sandbox boundaries
 
-Every bash command runs through `sandbox-exec` with this policy:
+Every bash command runs through the platform sandbox with this policy:
+
+- **macOS:** `sandbox-exec` with the compiled profile in `src/sandbox.sb`.
+- **Linux:** `bubblewrap` with the filesystem mounted read-only and explicit writable binds.
 
 - **Reads:** open. The agent can read its own kernel and source.
 - **Writes:** only `skills/`, `memory/`, `workspace/`, `logs/`, and `/tmp`.

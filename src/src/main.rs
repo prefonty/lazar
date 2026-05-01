@@ -1,6 +1,6 @@
 //! lazar — the smallest self-evolving agent harness.
 //!
-//! One tool: `execute(command)` runs bash through sandbox-exec.
+//! One tool: `execute(command)` runs bash through the platform sandbox.
 //! Everything else lives as skills under ~/lazar/skills/.
 //! Seed skills are embedded in the binary so `--reset-all` is a
 //! true factory restore.
@@ -48,6 +48,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_TOOL_OUTPUT_MAX_BYTES: usize = 200_000;
 const TOOL_READ_CHUNK_BYTES: usize = 8192;
+const MACOS_TOOL_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+const LINUX_TOOL_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 #[derive(Clone, Copy, Debug)]
 struct ToolLimits {
@@ -59,6 +61,20 @@ struct ToolLimits {
 struct CapturedOutput {
     bytes: Vec<u8>,
     total_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+enum SandboxBackend {
+    MacOs,
+    Linux,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SandboxCommandSpec {
+    program: String,
+    args: Vec<String>,
+    path: &'static str,
 }
 
 impl CapturedOutput {
@@ -290,6 +306,93 @@ fn kill_process_group(pid: u32) {
 #[cfg(not(unix))]
 fn kill_process_group(_pid: u32) {}
 
+#[cfg(target_os = "macos")]
+fn current_sandbox_backend() -> Result<SandboxBackend, String> {
+    Ok(SandboxBackend::MacOs)
+}
+
+#[cfg(target_os = "linux")]
+fn current_sandbox_backend() -> Result<SandboxBackend, String> {
+    Ok(SandboxBackend::Linux)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn current_sandbox_backend() -> Result<SandboxBackend, String> {
+    Err(format!(
+        "unsupported platform for lazar sandbox: {}",
+        env::consts::OS
+    ))
+}
+
+fn sandbox_command_spec(lazar: &str, cmd: &str) -> Result<SandboxCommandSpec, String> {
+    sandbox_command_spec_for(current_sandbox_backend()?, lazar, cmd)
+}
+
+fn sandbox_command_spec_for(
+    backend: SandboxBackend,
+    lazar: &str,
+    cmd: &str,
+) -> Result<SandboxCommandSpec, String> {
+    match backend {
+        SandboxBackend::MacOs => Ok(SandboxCommandSpec {
+            program: "/usr/bin/sandbox-exec".into(),
+            args: vec![
+                "-D".into(),
+                format!("SKILLS_PATH={lazar}/skills"),
+                "-D".into(),
+                format!("MEMORY_PATH={lazar}/memory"),
+                "-D".into(),
+                format!("WORKSPACE_PATH={lazar}/workspace"),
+                "-D".into(),
+                format!("LOGS_PATH={lazar}/logs"),
+                "-p".into(),
+                SANDBOX_PROFILE.into(),
+                "/bin/bash".into(),
+                "-c".into(),
+                cmd.into(),
+            ],
+            path: MACOS_TOOL_PATH,
+        }),
+        SandboxBackend::Linux => Ok(SandboxCommandSpec {
+            program: "bwrap".into(),
+            args: vec![
+                "--die-with-parent".into(),
+                "--ro-bind".into(),
+                "/".into(),
+                "/".into(),
+                "--dev".into(),
+                "/dev".into(),
+                "--proc".into(),
+                "/proc".into(),
+                "--bind".into(),
+                format!("{lazar}/skills"),
+                format!("{lazar}/skills"),
+                "--bind".into(),
+                format!("{lazar}/memory"),
+                format!("{lazar}/memory"),
+                "--bind".into(),
+                format!("{lazar}/workspace"),
+                format!("{lazar}/workspace"),
+                "--bind".into(),
+                format!("{lazar}/logs"),
+                format!("{lazar}/logs"),
+                "--bind".into(),
+                "/tmp".into(),
+                "/tmp".into(),
+                "--bind".into(),
+                "/var/tmp".into(),
+                "/var/tmp".into(),
+                "--chdir".into(),
+                format!("{lazar}/workspace"),
+                "/bin/bash".into(),
+                "-c".into(),
+                cmd.into(),
+            ],
+            path: LINUX_TOOL_PATH,
+        }),
+    }
+}
+
 fn run_bash(cmd: &str) -> String {
     let limits = ToolLimits::from_env();
     let lazar_path = lazar_home();
@@ -306,30 +409,19 @@ fn run_bash(cmd: &str) -> String {
         .unwrap_or(0);
     let child_depth = current_depth.saturating_add(1);
 
-    let mut command = Command::new("/usr/bin/sandbox-exec");
+    let sandbox = match sandbox_command_spec(&lazar, cmd) {
+        Ok(sandbox) => sandbox,
+        Err(e) => return format!("[sandbox error: {e}]\n[exit 1]"),
+    };
+    let mut command = Command::new(&sandbox.program);
     command
-        .arg("-D")
-        .arg(format!("SKILLS_PATH={lazar}/skills"))
-        .arg("-D")
-        .arg(format!("MEMORY_PATH={lazar}/memory"))
-        .arg("-D")
-        .arg(format!("WORKSPACE_PATH={lazar}/workspace"))
-        .arg("-D")
-        .arg(format!("LOGS_PATH={lazar}/logs"))
-        .arg("-p")
-        .arg(SANDBOX_PROFILE)
-        .arg("/bin/bash")
-        .arg("-c")
-        .arg(cmd)
+        .args(&sandbox.args)
         .current_dir(&workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear()
-        .env(
-            "PATH",
-            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        )
+        .env("PATH", sandbox.path)
         .env("HOME", &lazar)
         .env("LAZAR_HOME", &lazar)
         .env("LAZAR_SKILLS", format!("{lazar}/skills"))
@@ -866,7 +958,7 @@ fn run_agent(
         "You are lazar, a self-evolving agent.\n\
          \n\
          You have ONE tool: execute(command). It runs a bash command \
-         through sandbox-exec and returns stdout+stderr+exit code.\n\
+         through the platform sandbox and returns stdout+stderr+exit code.\n\
          \n\
          ARCHITECTURE\n\
          Your home is {home_disp}. Inside it:\n\
@@ -930,7 +1022,7 @@ fn run_agent(
          Recursion depth is capped at {max_depth}; current depth is {depth}.\n\
          \n\
          BOUNDARIES\n\
-         Writes are limited by sandbox-exec to skills/, memory/, \
+         Writes are limited by the platform sandbox to skills/, memory/, \
          workspace/, logs/, and /tmp. Do not try to modify bin/ or src/, \
          dotfiles, ssh keys, or anything outside ~/lazar. You will \
          see 'Operation not permitted' if you try; learn from the failure \
@@ -1224,6 +1316,15 @@ mod tests {
     use std::io::Cursor;
     use std::path::Path;
 
+    fn has_arg_window(args: &[String], expected: &[&str]) -> bool {
+        args.windows(expected.len()).any(|window| {
+            window
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied())
+        })
+    }
+
     #[test]
     fn env_flag_accepts_only_explicit_truthy_values() {
         let name = format!("LAZAR_TEST_FLAG_{}_{}", std::process::id(), now_millis());
@@ -1315,5 +1416,51 @@ mod tests {
         let err = validate_reset_home(Path::new(&home)).unwrap_err();
 
         assert!(err.contains("refusing to reset HOME"));
+    }
+
+    #[test]
+    fn macos_sandbox_spec_uses_sandbox_exec() {
+        let spec = sandbox_command_spec_for(SandboxBackend::MacOs, "/tmp/lazar-home", "echo ok")
+            .expect("macos sandbox spec");
+
+        assert_eq!(spec.program, "/usr/bin/sandbox-exec");
+        assert_eq!(spec.path, MACOS_TOOL_PATH);
+        assert!(spec.args.iter().any(|arg| arg == "-p"));
+        assert!(spec
+            .args
+            .iter()
+            .any(|arg| arg == "SKILLS_PATH=/tmp/lazar-home/skills"));
+        assert!(spec.args.ends_with(&[
+            "/bin/bash".to_string(),
+            "-c".to_string(),
+            "echo ok".to_string()
+        ]));
+    }
+
+    #[test]
+    fn linux_sandbox_spec_uses_bubblewrap_with_writable_zones() {
+        let spec = sandbox_command_spec_for(SandboxBackend::Linux, "/home/lazar/lazar", "echo ok")
+            .expect("linux sandbox spec");
+
+        assert_eq!(spec.program, "bwrap");
+        assert_eq!(spec.path, LINUX_TOOL_PATH);
+        assert!(has_arg_window(&spec.args, &["--ro-bind", "/", "/"]));
+        for zone in ["skills", "memory", "workspace", "logs"] {
+            let path = format!("/home/lazar/lazar/{zone}");
+            assert!(has_arg_window(
+                &spec.args,
+                &["--bind", path.as_str(), path.as_str()]
+            ));
+        }
+        assert!(has_arg_window(&spec.args, &["--bind", "/tmp", "/tmp"]));
+        assert!(has_arg_window(
+            &spec.args,
+            &["--chdir", "/home/lazar/lazar/workspace", "/bin/bash"]
+        ));
+        assert!(spec.args.ends_with(&[
+            "/bin/bash".to_string(),
+            "-c".to_string(),
+            "echo ok".to_string()
+        ]));
     }
 }

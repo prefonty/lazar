@@ -1,6 +1,6 @@
 # propose-kernel-patch
 
-When you identify a change that needs to happen in the immutable kernel (`bin/lazar` or `src/`), you cannot apply it yourself — sandbox-exec blocks writes there, and `chflags uchg` blocks them at the OS level too. **Instead, stage a complete proposal in workspace/ that the user can review and apply with one command.**
+When you identify a change that needs to happen in the immutable kernel (`bin/lazar` or `src/`), you cannot apply it yourself — the platform sandbox blocks writes there, and the installer seals those paths (`chflags uchg` on macOS, read-only file modes on Linux). **Instead, stage a complete proposal in workspace/ that the user can review and apply with one command.**
 
 ## When to use
 

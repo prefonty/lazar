@@ -6,9 +6,29 @@ set -euo pipefail
 LAZAR_HOME="${LAZAR_HOME:-$HOME/lazar}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$LAZAR_HOME/workspace/.cargo-target}"
+OS_NAME="$(uname -s)"
 
 fail() { echo "error: $*" >&2; exit 1; }
 quote() { printf '%q' "$1"; }
+linux_deps_hint() {
+    echo "On Ubuntu/Debian, install dependencies with:" >&2
+    echo "  sudo apt-get update && sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl ca-certificates git" >&2
+}
+unlock_binary() {
+    if [[ "$OS_NAME" == "Darwin" ]]; then
+        chflags nouchg "$LAZAR_HOME/bin/lazar" 2>/dev/null || true
+    fi
+    chmod u+w "$LAZAR_HOME/bin/lazar" 2>/dev/null || true
+}
+lock_binary() {
+    chmod 555 "$LAZAR_HOME/bin/lazar"
+    if [[ "$OS_NAME" == "Darwin" ]]; then
+        chflags uchg "$LAZAR_HOME/bin/lazar"
+    fi
+}
+seal_source() {
+    chmod -R a-w "$LAZAR_HOME/src"
+}
 
 case "$LAZAR_HOME" in
     ""|"/"|"$HOME") fail "unsafe LAZAR_HOME: $LAZAR_HOME" ;;
@@ -16,12 +36,21 @@ case "$LAZAR_HOME" in
     *) fail "LAZAR_HOME must be absolute: $LAZAR_HOME" ;;
 esac
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-    fail "lazar setup requires macOS (sandbox-exec + chflags)"
+case "$OS_NAME" in
+    Darwin|Linux) ;;
+    *) fail "unsupported OS: $OS_NAME (supported: macOS and Linux)" ;;
+esac
+if [[ "$OS_NAME" == "Linux" && "$(id -u)" == "0" ]]; then
+    fail "do not run lazar setup as root; create a dedicated non-root user first"
 fi
 command -v cargo >/dev/null 2>&1 || fail "cargo not found. Install Rust from https://rustup.rs/"
-command -v chflags >/dev/null 2>&1 || fail "chflags not found"
-[[ -x /usr/bin/sandbox-exec ]] || fail "sandbox-exec not found at /usr/bin/sandbox-exec"
+if [[ "$OS_NAME" == "Darwin" ]]; then
+    command -v chflags >/dev/null 2>&1 || fail "chflags not found"
+    [[ -x /usr/bin/sandbox-exec ]] || fail "sandbox-exec not found at /usr/bin/sandbox-exec"
+else
+    command -v bash >/dev/null 2>&1 || { linux_deps_hint; fail "bash not found"; }
+    command -v bwrap >/dev/null 2>&1 || { linux_deps_hint; fail "bwrap not found"; }
+fi
 
 if [[ ! -d "$SCRIPT_DIR/src" ]]; then
     fail "source tree not found at $SCRIPT_DIR/src"
@@ -69,10 +98,10 @@ TMP_BIN="$LAZAR_HOME/bin/.lazar.$$.tmp"
 rm -f "$TMP_BIN"
 cp "$BUILT" "$TMP_BIN"
 chmod 555 "$TMP_BIN"
-chflags nouchg "$LAZAR_HOME/bin/lazar" 2>/dev/null || true
+unlock_binary
 mv -f "$TMP_BIN" "$LAZAR_HOME/bin/lazar"
-chflags uchg "$LAZAR_HOME/bin/lazar"
-chmod -R a-w "$LAZAR_HOME/src"
+lock_binary
+seal_source
 
 # Install helper scripts so printed maintenance commands work from LAZAR_HOME.
 if [[ "$SCRIPT_DIR" != "$LAZAR_HOME" ]]; then
@@ -111,15 +140,21 @@ else
     echo "        export PATH=\"$LAZAR_HOME/bin:\$PATH\""
 fi
 
+if [[ "$OS_NAME" == "Darwin" ]]; then
+    REBUILD_UNLOCK="chflags nouchg $(quote "$LAZAR_HOME/bin/lazar")
+             chmod u+w $(quote "$LAZAR_HOME/bin/lazar")"
+else
+    REBUILD_UNLOCK="chmod u+w $(quote "$LAZAR_HOME/bin/lazar")"
+fi
+
 cat <<EOF
 
-[lazar] built and locked.
+[lazar] built and locked for $OS_NAME.
 
   api key:   export ANTHROPIC_API_KEY=***
   use:       lazar -p "your prompt here"
   reset:     lazar --reset-all
-  rebuild:   chflags nouchg $(quote "$LAZAR_HOME/bin/lazar")
-             chmod u+w $(quote "$LAZAR_HOME/bin/lazar")
+  rebuild:   $REBUILD_UNLOCK
              chmod -R u+w $(quote "$LAZAR_HOME/src")
              bash $(quote "$LAZAR_HOME/scripts/kernel-build.sh")
 
