@@ -141,6 +141,7 @@ if [[ "${LAZAR_RESET_ALL:-0}" == "1" ]]; then
 elif [[ ! -f "$LAZAR_HOME/skills/INDEX.md" ]]; then
     echo "[lazar] seeding default skills into empty skills/"
     cp -R "$LAZAR_HOME/src/seed-skills/." "$LAZAR_HOME/skills/"
+    chmod -R u+w "$LAZAR_HOME/skills"
 else
     echo "[lazar] preserving existing skills/memory/workspace/logs (no reset)"
 fi

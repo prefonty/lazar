@@ -19,7 +19,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd, process::CommandExt};
+use std::os::unix::{fs::OpenOptionsExt, fs::PermissionsExt, io::AsRawFd, process::CommandExt};
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum OutputFormat {
@@ -177,6 +177,33 @@ fn validate_reset_home(home: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn make_tree_user_writable(path: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    let mut permissions = metadata.permissions();
+    let mode = permissions.mode();
+    if metadata.is_dir() {
+        permissions.set_mode(mode | 0o700);
+        fs::set_permissions(path, permissions)?;
+        for entry in fs::read_dir(path)? {
+            make_tree_user_writable(&entry?.path())?;
+        }
+    } else {
+        permissions.set_mode(mode | 0o600);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_tree_user_writable(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn emit_stream_error(format: OutputFormat, message: &str) {
     if format == OutputFormat::StreamJson {
         emit_event(json!({"type": "error", "message": message}));
@@ -253,12 +280,14 @@ fn reset_all(skip_confirm: bool) -> Result<(), Box<dyn std::error::Error>> {
     for sub in ["skills", "memory", "workspace", "logs"] {
         let p = home.join(sub);
         if p.exists() {
+            make_tree_user_writable(&p)?;
             fs::remove_dir_all(&p)?;
         }
         fs::create_dir_all(&p)?;
     }
 
     SEED_SKILLS.extract(home.join("skills"))?;
+    make_tree_user_writable(&home.join("skills"))?;
     eprintln!(
         "[lazar] reset complete. {} seed files written.",
         SEED_SKILLS.files().count()
