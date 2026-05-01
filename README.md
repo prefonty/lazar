@@ -72,6 +72,22 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
 
+If `setup.sh` reports that `bwrap` cannot create a sandbox, Ubuntu 24.04 may
+be blocking unprivileged user namespaces with AppArmor. Add a narrow profile for
+`/usr/bin/bwrap` instead of disabling the restriction globally:
+
+```bash
+sudo tee /etc/apparmor.d/bwrap >/dev/null <<'PROFILE'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}
+PROFILE
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
 ### From a git clone (recommended)
 
 ```bash

@@ -56,6 +56,9 @@ case "$OS_NAME" in
         command -v bwrap >/dev/null 2>&1 \
             && pass "bubblewrap sandbox backend available" \
             || fail "bwrap not found — install bubblewrap"
+        bwrap --ro-bind / / /bin/true >/dev/null 2>&1 \
+            && pass "bubblewrap can create a sandbox" \
+            || fail "bwrap cannot create a sandbox — on Ubuntu 24.04 check the /usr/bin/bwrap AppArmor userns profile"
         ;;
     *)
         fail "unsupported OS: $OS_NAME"

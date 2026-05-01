@@ -12,6 +12,31 @@ linux_deps_hint() {
     echo "On Ubuntu/Debian, install dependencies with:" >&2
     echo "  sudo apt-get update && sudo apt-get install -y bubblewrap build-essential pkg-config libssl-dev curl ca-certificates git" >&2
 }
+bwrap_userns_hint() {
+    cat >&2 <<'EOF'
+bwrap is installed but cannot create a sandbox. On Ubuntu 24.04 with
+kernel.apparmor_restrict_unprivileged_userns=1, add a narrow AppArmor profile:
+
+  sudo tee /etc/apparmor.d/bwrap >/dev/null <<'PROFILE'
+  abi <abi/4.0>,
+  include <tunables/global>
+
+  profile bwrap /usr/bin/bwrap flags=(unconfined) {
+    userns,
+  }
+  PROFILE
+  sudo apparmor_parser -r /etc/apparmor.d/bwrap
+
+This permits user namespaces for /usr/bin/bwrap without globally disabling the
+AppArmor unprivileged-user-namespace restriction.
+EOF
+}
+check_bwrap_usable() {
+    bwrap --ro-bind / / /bin/true >/dev/null 2>&1 || {
+        bwrap_userns_hint
+        fail "bwrap sandbox smoke test failed"
+    }
+}
 unlock_binary() {
     if [[ "$OS_NAME" == "Darwin" ]]; then
         chflags nouchg "$LAZAR_HOME/bin/lazar" 2>/dev/null || true
@@ -43,6 +68,7 @@ case "$OS_NAME" in
         fi
         command -v bash >/dev/null 2>&1 || { linux_deps_hint; fail "bash not found"; }
         command -v bwrap >/dev/null 2>&1 || { linux_deps_hint; fail "bwrap not found"; }
+        check_bwrap_usable
         ;;
     *) fail "unsupported OS: $OS_NAME (supported: macOS and Linux)" ;;
 esac
